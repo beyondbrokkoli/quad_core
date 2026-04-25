@@ -47,6 +47,7 @@ function love.load()
     Sequence.RunPhase("Init")
     -- Ignite the Permanent Quad-Core Engine!
     VibeMath.vmath_init_thread_pool()
+    collectgarbage()
 end
 
 function love.update(dt)

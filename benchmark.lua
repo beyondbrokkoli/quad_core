@@ -29,35 +29,39 @@ function Benchmark.Tick(dt, CameraData, CamLogic, Swarm)
 
     -- 3. THE FLIGHT PATH
     if t >= 2.0 then
-        local angle = t * 0.5 
-        
+        local angle = t * 0.5
+
         local radius = 10000
-        if t > 4.0 and t < 8.0 then
-            local dive = math.sin((t - 4.0) * (math.pi / 4.0)) 
-            -- Dive all the way down to 2500!
-            radius = 10000 - (dive * 7500) 
+        if t > 4.0 and t < 18.0 then -- Extended dive window to match your 20s run!
+            -- Creates a smooth, slow dive curve over 14 seconds
+            local dive = math.sin((t - 4.0) * (math.pi / 14.0))
+            radius = 10000 - (dive * 7500)
         end
-        
+
+        local target_y = 5000 -- The exact height the C-engine spawns the Bundle!
+
         -- WRITE TO THE C STRUCT!
         CameraData.x = math.cos(angle) * radius
         CameraData.z = math.sin(angle) * radius
-        CameraData.y = math.sin(t) * 3000 
+        CameraData.y = target_y + math.sin(t) * 3000 -- Bob up and down around the sphere
 
         CameraData.yaw = -angle - (math.pi / 2)
-        CameraData.pitch = -math.atan2(CameraData.y, radius)
+        -- Pitch based on the relative distance to the target!
+        CameraData.pitch = -math.atan2(CameraData.y - target_y, radius)
 
         -- EXECUTE THE LUA LOGIC!
-        CamLogic.UpdateVectors() 
+        CamLogic.UpdateVectors()
     end
 
-    -- 4. MEASURE FPS
-    if t >= 4.0 and t <= 10.0 then
+    -- 4. MEASURE FPS (Measure the whole flight!)
+    if t >= 4.0 and t <= 60.0 then
         Benchmark.frames = Benchmark.frames + 1
         Benchmark.fps_accum = Benchmark.fps_accum + (1.0 / dt)
         Benchmark.measurements = Benchmark.measurements + 1
     end
 
-    if t > 20.0 then
+    -- 5. REPORT AND QUIT
+    if t > 60.0 then
         local avg_fps = Benchmark.fps_accum / Benchmark.measurements
         print("\n===========================================")
         print(string.format("[BENCHMARK] Quad Core Average FPS: %.2f", avg_fps))

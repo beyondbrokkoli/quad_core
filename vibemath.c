@@ -513,6 +513,8 @@ EXPORT void vmath_process_triangles(
         tri_valid[i] = true;
     }
 }
+#define USE_NEW_RASTERIZER 1
+#if USE_NEW_RASTERIZER
 EXPORT void vmath_rasterize_list(
     int* display_list, int list_count,
     int* v1, int* v2, int* v3,
@@ -676,6 +678,164 @@ EXPORT void vmath_rasterize_list(
         }
     }
 }
+#else
+EXPORT void vmath_rasterize_list(
+    int* display_list, int list_count,
+    int* v1, int* v2, int* v3, 
+    float* px, float* py, float* pz,
+    uint32_t* shaded_color,
+    uint32_t* screen_buffer, float* z_buffer,
+    int canvas_w, int canvas_h,
+    int min_clip_y, int max_clip_y
+) {
+    for (int k = 0; k < list_count; k++) {
+        // [SMART CACHE]: Fetch the exact Triangle ID from the bin!
+        int i = display_list[k]; 
+
+        int i1 = v1[i], i2 = v2[i], i3 = v3[i];
+        float x1 = px[i1], y1 = py[i1], z1 = pz[i1];
+        float x2 = px[i2], y2 = py[i2], z2 = pz[i2];
+        float x3 = px[i3], y3 = py[i3], z3 = pz[i3];
+
+        __m256i v_color = _mm256_set1_epi32((int)shaded_color[i]);
+
+        if (y1 > y2) { float t=x1; x1=x2; x2=t;  t=y1; y1=y2; y2=t;  t=z1; z1=z2; z2=t; }
+        if (y1 > y3) { float t=x1; x1=x3; x3=t;  t=y1; y1=y3; y3=t;  t=z1; z1=z3; z3=t; }
+        if (y2 > y3) { float t=x2; x2=x3; x3=t;  t=y2; y2=y3; y3=t;  t=z2; z2=z3; z3=t; }
+
+        float total_height = y3 - y1;
+        if (total_height <= 0.0f) continue;
+
+        int y_start = (int)fmaxf((float)min_clip_y, ceilf(y1));
+        int y_end   = (int)fminf((float)max_clip_y, floorf(y3));
+
+        if (y_start > y_end) continue; 
+        
+        float inv_total = 1.0f / total_height;
+
+        // ==========================================
+        // UPPER TRIANGLE (Keep the exact same math, just limit the Y loop!)
+        // ==========================================
+        float dy_upper = y2 - y1;
+        if (dy_upper > 0.0f) {
+            float inv_upper = 1.0f / dy_upper;
+            // Ensure we don't draw past the thread's max_clip_y, even if the triangle continues
+            int limit_y = (int)fminf((float)y_end, floorf(y2)); 
+
+            for (int y = y_start; y <= limit_y; y++) {
+                // ... [Keep your exact horizontal AVX2 row rendering loop here!] ...
+                float t_total = (y - y1) * inv_total;
+                float t_half  = (y - y1) * inv_upper;
+                float ax = x1 + (x3 - x1) * t_total, az = z1 + (z3 - z1) * t_total;
+                float bx = x1 + (x2 - x1) * t_half,  bz = z1 + (z2 - z1) * t_half;
+
+                if (ax > bx) { float t=ax; ax=bx; bx=t;  t=az; az=bz; bz=t; }
+
+                float row_width = bx - ax;
+                if (row_width > 0.0f) {
+                    float z_step = (bz - az) / row_width;
+                    int start_x = (int)fmaxf(0.0f, ceilf(ax));
+                    int end_x   = (int)fminf((float)(canvas_w - 1), floorf(bx));
+                    float current_z = az + z_step * (start_x - ax);
+
+                    int off = y * canvas_w;
+                    int x = start_x;
+
+                    // --- THE AVX2 HORIZONTAL LOOP ---
+                    __m256 v_z_step8 = _mm256_set1_ps(z_step * 8.0f);
+                    __m256 v_current_z = _mm256_set_ps(
+                        current_z + z_step*7.0f, current_z + z_step*6.0f,
+                        current_z + z_step*5.0f, current_z + z_step*4.0f,
+                        current_z + z_step*3.0f, current_z + z_step*2.0f,
+                        current_z + z_step*1.0f, current_z
+                    );
+
+                    for (; x <= end_x - 7; x += 8) {
+                        __m256 v_old_z = _mm256_loadu_ps(&z_buffer[off + x]);
+                        __m256 v_cmp = _mm256_cmp_ps(v_current_z, v_old_z, _CMP_LT_OQ);
+                        __m256i v_mask = _mm256_castps_si256(v_cmp);
+
+                        _mm256_maskstore_ps(&z_buffer[off + x], v_mask, v_current_z);
+                        _mm256_maskstore_epi32((int*)&screen_buffer[off + x], v_mask, v_color);
+
+                        v_current_z = _mm256_add_ps(v_current_z, v_z_step8);
+                    }
+
+                    // --- SCALAR TAIL LOOP ---
+                    current_z = az + z_step * (x - ax); // Recalculate scalar Z exactly
+                    for (; x <= end_x; x++) {
+                        if (current_z < z_buffer[off + x]) {
+                            z_buffer[off + x] = current_z;
+                            screen_buffer[off + x] = (uint32_t)shaded_color[i];
+                        }
+                        current_z += z_step;
+                    }
+                }
+            }
+        }
+        // ==========================================
+        // LOWER TRIANGLE
+        // ==========================================
+        float dy_lower = y3 - y2;
+        if (dy_lower > 0.0f) {
+            float inv_lower = 1.0f / dy_lower;
+            // Ensure we don't start drawing before the thread's min_clip_y!
+            int start_y = (int)fmaxf((float)y_start, ceilf(y2));
+
+            for (int y = start_y; y <= y_end; y++) {
+                // ... [Keep your exact horizontal AVX2 row rendering loop here!] ...
+                float t_total = (y - y1) * inv_total;
+                float t_half  = (y - y2) * inv_lower;
+                float ax = x1 + (x3 - x1) * t_total, az = z1 + (z3 - z1) * t_total;
+                float bx = x2 + (x3 - x2) * t_half,  bz = z2 + (z3 - z2) * t_half;
+
+                if (ax > bx) { float t=ax; ax=bx; bx=t;  t=az; az=bz; bz=t; }
+
+                float row_width = bx - ax;
+                if (row_width > 0.0f) {
+                    float z_step = (bz - az) / row_width;
+                    int start_x = (int)fmaxf(0.0f, ceilf(ax));
+                    int end_x   = (int)fminf((float)(canvas_w - 1), floorf(bx));
+                    float current_z = az + z_step * (start_x - ax);
+
+                    int off = y * canvas_w;
+                    int x = start_x;
+
+                    // --- THE AVX2 HORIZONTAL LOOP ---
+                    __m256 v_z_step8 = _mm256_set1_ps(z_step * 8.0f);
+                    __m256 v_current_z = _mm256_set_ps(
+                        current_z + z_step*7.0f, current_z + z_step*6.0f,
+                        current_z + z_step*5.0f, current_z + z_step*4.0f,
+                        current_z + z_step*3.0f, current_z + z_step*2.0f,
+                        current_z + z_step*1.0f, current_z
+                    );
+
+                    for (; x <= end_x - 7; x += 8) {
+                        __m256 v_old_z = _mm256_loadu_ps(&z_buffer[off + x]);
+                        __m256 v_cmp = _mm256_cmp_ps(v_current_z, v_old_z, _CMP_LT_OQ);
+                        __m256i v_mask = _mm256_castps_si256(v_cmp);
+
+                        _mm256_maskstore_ps(&z_buffer[off + x], v_mask, v_current_z);
+                        _mm256_maskstore_epi32((int*)&screen_buffer[off + x], v_mask, v_color);
+
+                        v_current_z = _mm256_add_ps(v_current_z, v_z_step8);
+                    }
+
+                    // --- SCALAR TAIL LOOP ---
+                    current_z = az + z_step * (x - ax);
+                    for (; x <= end_x; x++) {
+                        if (current_z < z_buffer[off + x]) {
+                            z_buffer[off + x] = current_z;
+                            screen_buffer[off + x] = (uint32_t)shaded_color[i];
+                        }
+                        current_z += z_step;
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
 // ========================================================================
 // SWARM PHYSICS (The Particle Baseline)
 // ========================================================================
