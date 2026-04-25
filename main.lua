@@ -3,7 +3,10 @@ local bit = require("bit")
 local VibeMath = require("load")
 local Memory = require("memory")
 local Sequence = require("sequence")
-require("bench")
+local Benchmark = require("benchmark")
+-- [NEW] Declare the module references here
+local SwarmModule
+local CameraModule
 local CANVAS_W, CANVAS_H
 local ScreenBuffer, ScreenImage, ScreenPtr
 local ZBuffer
@@ -37,6 +40,10 @@ function love.load()
 
     Sequence.LoadModule("camera", MainCamera)
     Sequence.LoadModule("swarm")
+    -- [NEW] Cache the reference exactly once after loading!
+    SwarmModule = Sequence.Loaded["swarm"]
+    CameraModule = Sequence.Loaded["camera"]
+
     Sequence.RunPhase("Init")
     -- Ignite the Permanent Quad-Core Engine!
     VibeMath.vmath_init_thread_pool()
@@ -46,6 +53,8 @@ function love.update(dt)
     dt = math.min(dt, 0.033)
     global_time = global_time + dt
     Sequence.RunPhase("Tick", dt)
+    -- [NEW] Run the benchmark override
+    Benchmark.Tick(dt, CameraModule, SwarmModule)
 end
 
 function love.draw()
@@ -85,8 +94,6 @@ function love.draw()
     q[q_len] = CMD.RENDER_CULL; q_len = q_len + 1
     q[q_len] = 0;               q_len = q_len + 1 -- Pass ID 0 as argument
 
-    BENCH.Begin("CommandQueue_Execute")
-
     -- Ping-Pong the buffers!
     read_buffer, write_buffer = write_buffer, read_buffer
 
@@ -97,7 +104,6 @@ function love.draw()
         global_time, love.timer.getDelta(), read_buffer, write_buffer
     )
 
-    BENCH.End("CommandQueue_Execute")
 
     ScreenImage:replacePixels(ScreenBuffer)
     love.graphics.setColor(1, 1, 1, 1)
@@ -106,7 +112,7 @@ function love.draw()
 
     love.graphics.setBlendMode("alpha")
     love.graphics.setColor(0, 1, 0, 1)
-    love.graphics.print("FPS: " .. love.timer.getFPS() .. " | PURE COMMAND QUEUE", 10, 10)
+    love.graphics.print("FPS: " .. love.timer.getFPS(), 10, 10)
 end
 
 function love.keypressed(key)

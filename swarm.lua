@@ -87,7 +87,10 @@ return function()
             tIdx = tIdx + 1
         end
     end
-
+    -- Allow external modules to hijack the physics state
+    function Swarm.ForceState(state)
+        target_state = state
+    end
     function Swarm.Tick(dt)
         local space_down = love.keyboard.isDown("space")
         if space_down and not space_pressed_last then
