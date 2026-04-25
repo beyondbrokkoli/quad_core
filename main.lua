@@ -54,7 +54,7 @@ function love.update(dt)
     global_time = global_time + dt
     Sequence.RunPhase("Tick", dt)
     -- [NEW] Run the benchmark override
-    Benchmark.Tick(dt, CameraModule, SwarmModule)
+    Benchmark.Tick(dt, MainCamera, CameraModule, SwarmModule)
 end
 
 function love.draw()
